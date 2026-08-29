@@ -9,7 +9,8 @@ import { ClientRow, JobRow, ModelRow, StageRow, StageRunRow } from "@/lib/types"
 
 // One stage per invocation — keeps each request within serverless limits
 // and makes stop/resume natural.
-export const maxDuration = 800;
+// 300 s = maksimum planu Hobby na Vercelu; na planie Pro można podnieść do 800.
+export const maxDuration = 300;
 
 type Ctx = { params: Promise<{ id: string }> };
 

@@ -77,9 +77,9 @@ vercel --prod
 ```
 
 Uwaga: etapy typu deep research potrafią trwać kilka minut. Trasa `run-stage` deklaruje
-`maxDuration = 800` — na planie Hobby limit funkcji to 300 s (z Fluid Compute), na Pro 800 s.
-Jeśli etap przekracza limit planu, zostanie przerwany i oznaczony jako błąd — można go
-wznowić lub użyć szybszego modelu.
+`maxDuration = 300` (maksimum planu Hobby); na planie Pro można podnieść do 800 w
+`src/app/api/jobs/[id]/run-stage/route.ts`. Jeśli etap przekroczy limit planu, zostanie
+przerwany i oznaczony jako błąd — można go wznowić lub użyć szybszego modelu.
 
 ## Bezpieczeństwo
 
