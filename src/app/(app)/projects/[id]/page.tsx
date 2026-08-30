@@ -20,6 +20,7 @@ import { runJob } from "@/lib/runner";
 import { ClientRow, JobRow, ProjectRow, StageRow, VariableDef } from "@/lib/types";
 import { MaskedModel } from "@/lib/maskModel";
 import { extractVariables } from "@/lib/interpolate";
+import { getModelCaps } from "@/lib/modelCaps";
 
 interface ProjectDetail extends ProjectRow {
   clients: ClientRow;
@@ -415,8 +416,22 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   </Button>
                 </div>
               </div>
-              {openStage === i && (
+              {openStage === i && (() => {
+                const selModel = models.find((m) => m.id === s.model_id);
+                const caps = selModel ? getModelCaps(selModel.provider, selModel.model_id) : null;
+                const thinkingSupported = !caps || caps.thinkingLevels.length > 0;
+                const samplingEnabled =
+                  !caps ||
+                  (caps.samplingOnlyWithThinkingNone
+                    ? (s.thinking_level ?? "") === "none"
+                    : caps.temperature);
+                return (
                 <div className="space-y-3 border-t border-zinc-200 p-4 dark:border-zinc-800">
+                  {caps?.note && (
+                    <p className="rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800 dark:bg-blue-950 dark:text-blue-200">
+                      {caps.note}
+                    </p>
+                  )}
                   <div className="grid gap-3 md:grid-cols-3">
                     <Field label="Nazwa etapu (agenta)">
                       <Input value={s.name} onChange={(e) => setStage(i, { name: e.target.value })} />
@@ -436,32 +451,73 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                           ))}
                       </Select>
                     </Field>
-                    <Field label="Thinking level" hint="np. low / medium / high (jeśli model wspiera)">
-                      <Input
-                        value={s.thinking_level ?? ""}
-                        onChange={(e) => setStage(i, { thinking_level: e.target.value || null })}
-                      />
+                    <Field
+                      label="Thinking level"
+                      hint={
+                        !thinkingSupported
+                          ? "Ten model nie ma parametru thinking."
+                          : caps
+                            ? `Dozwolone: ${caps.thinkingLevels.join(" / ")}${caps.thinkingDefault ? ` (domyślnie ${caps.thinkingDefault})` : ""}`
+                            : "np. low / medium / high (jeśli model wspiera)"
+                      }
+                    >
+                      {caps && caps.thinkingLevels.length > 0 ? (
+                        <Select
+                          value={s.thinking_level ?? ""}
+                          onChange={(e) => setStage(i, { thinking_level: e.target.value || null })}
+                        >
+                          <option value="">— domyślny —</option>
+                          {caps.thinkingLevels.map((lv) => (
+                            <option key={lv} value={lv}>{lv}</option>
+                          ))}
+                        </Select>
+                      ) : (
+                        <Input
+                          value={s.thinking_level ?? ""}
+                          disabled={Boolean(caps) && !thinkingSupported}
+                          onChange={(e) => setStage(i, { thinking_level: e.target.value || null })}
+                        />
+                      )}
                     </Field>
-                    <Field label="Temperature">
+                    <Field
+                      label="Temperature"
+                      hint={
+                        caps?.samplingOnlyWithThinkingNone && !samplingEnabled
+                          ? "Działa tylko przy thinking = none — inaczej zostanie pominięta."
+                          : undefined
+                      }
+                    >
                       <Input
                         type="number" step="0.05" min="0" max="2"
                         value={s.temperature ?? ""}
+                        disabled={!samplingEnabled}
                         onChange={(e) =>
                           setStage(i, { temperature: e.target.value === "" ? null : Number(e.target.value) })
                         }
                       />
                     </Field>
-                    <Field label="Top K">
+                    <Field label="Top K" hint={caps && !caps.topK ? "Model nie wspiera top_k." : undefined}>
                       <Input
                         type="number" step="1" min="0"
                         value={s.top_k ?? ""}
+                        disabled={Boolean(caps) && !caps!.topK}
                         onChange={(e) => setStage(i, { top_k: e.target.value === "" ? null : Number(e.target.value) })}
                       />
                     </Field>
-                    <Field label="Top P">
+                    <Field
+                      label="Top P"
+                      hint={
+                        caps && !caps.topP
+                          ? "Model nie wspiera top_p."
+                          : caps?.samplingOnlyWithThinkingNone && !samplingEnabled
+                            ? "Działa tylko przy thinking = none."
+                            : undefined
+                      }
+                    >
                       <Input
                         type="number" step="0.05" min="0" max="1"
                         value={s.top_p ?? ""}
+                        disabled={Boolean(caps) && (!caps!.topP || !samplingEnabled)}
                         onChange={(e) => setStage(i, { top_p: e.target.value === "" ? null : Number(e.target.value) })}
                       />
                     </Field>
@@ -502,7 +558,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     />
                   </Field>
                 </div>
-              )}
+                );
+              })()}
             </Card>
           ))}
         </div>

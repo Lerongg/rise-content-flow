@@ -147,6 +147,17 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
 
     const cost = calcCost(model, result.inputTokens, result.outputTokens);
 
+    const droppedParams = (result.requestPayload as { pominiete_parametry?: string[] })
+      .pominiete_parametry;
+    if (droppedParams?.length) {
+      await logEvent(
+        "warn",
+        `Etap „${stage.name}”: model ${model.model_id} nie wspiera części parametrów — pominięto: ${droppedParams.join(", ")}`,
+        { dropped: droppedParams },
+        jobId
+      );
+    }
+
     // Optional: publish the stage output as a WordPress draft
     let wpDraftUrl: string | null = null;
     let wpError: string | null = null;

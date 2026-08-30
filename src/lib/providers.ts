@@ -1,4 +1,5 @@
 import { ModelRow } from "./types";
+import { sanitizeParams } from "./modelCaps";
 
 export interface LlmCallOptions {
   prompt: string;
@@ -69,15 +70,41 @@ export async function callLlm(model: ModelRow, opts: LlmCallOptions): Promise<Ll
   }
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+  // Przytnij parametry do możliwości modelu (np. modele reasoningowe OpenAI
+  // nie przyjmują temperature/top_p poza poziomem "none").
+  const sane = sanitizeParams(model.provider, model.model_id, {
+    temperature: opts.temperature,
+    topK: opts.topK,
+    topP: opts.topP,
+    thinkingLevel: opts.thinkingLevel,
+  });
+  opts = {
+    ...opts,
+    temperature: sane.temperature,
+    topK: sane.topK,
+    topP: sane.topP,
+    thinkingLevel: sane.thinkingLevel,
+  };
+
+  const attach = (r: LlmResult): LlmResult => {
+    if (sane.dropped.length) {
+      r.requestPayload = {
+        ...r.requestPayload,
+        pominiete_parametry: sane.dropped,
+      };
+    }
+    return r;
+  };
+
   switch (model.provider) {
     case "gemini":
-      return callGemini(model, opts, timeoutMs);
+      return attach(await callGemini(model, opts, timeoutMs));
     case "anthropic":
-      return callAnthropic(model, opts, timeoutMs);
+      return attach(await callAnthropic(model, opts, timeoutMs));
     case "openai":
     case "perplexity":
     case "openai-compatible":
-      return callOpenAiCompatible(model, opts, timeoutMs);
+      return attach(await callOpenAiCompatible(model, opts, timeoutMs));
     default:
       throw new Error(`Nieznany dostawca modelu: ${model.provider}`);
   }
@@ -97,7 +124,15 @@ async function callGemini(
   if (opts.topP != null) generationConfig.topP = opts.topP;
   if (opts.maxOutputTokens != null) generationConfig.maxOutputTokens = opts.maxOutputTokens;
   if (opts.thinkingLevel) {
-    generationConfig.thinkingConfig = { thinkingLevel: opts.thinkingLevel.toUpperCase() };
+    if (/^gemini-2\.5/.test(model.model_id)) {
+      // Gemini 2.5 używa liczbowego thinkingBudget zamiast thinkingLevel
+      const budgets: Record<string, number> = { low: 1024, medium: 8192, high: 24576 };
+      generationConfig.thinkingConfig = {
+        thinkingBudget: budgets[opts.thinkingLevel.toLowerCase()] ?? 8192,
+      };
+    } else {
+      generationConfig.thinkingConfig = { thinkingLevel: opts.thinkingLevel.toUpperCase() };
+    }
   }
 
   const body: Record<string, unknown> = {
@@ -147,7 +182,7 @@ async function callOpenAiCompatible(
   if (opts.temperature != null) body.temperature = opts.temperature;
   if (opts.topP != null) body.top_p = opts.topP;
   if (opts.maxOutputTokens != null) body.max_tokens = opts.maxOutputTokens;
-  if (opts.thinkingLevel && model.provider === "openai") {
+  if (opts.thinkingLevel && (model.provider === "openai" || model.provider === "perplexity")) {
     body.reasoning_effort = opts.thinkingLevel.toLowerCase();
   }
 
