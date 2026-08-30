@@ -22,13 +22,17 @@ export function outputToHtml(output: string): string {
  */
 export async function copyRichText(html: string, plain: string): Promise<void> {
   if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
-    await navigator.clipboard.write([
-      new ClipboardItem({
-        "text/html": new Blob([html], { type: "text/html" }),
-        "text/plain": new Blob([plain], { type: "text/plain" }),
-      }),
-    ]);
-    return;
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([plain], { type: "text/plain" }),
+        }),
+      ]);
+      return;
+    } catch {
+      // brak uprawnień / starsza przeglądarka — spróbuj metody legacy poniżej
+    }
   }
   // Fallback: select a hidden node and use the legacy copy command
   const container = document.createElement("div");
