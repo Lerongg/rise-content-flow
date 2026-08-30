@@ -255,6 +255,19 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
       {tab === "jobs" && (
         <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              ["Zapytania (ukończone)", `${jobs.length} (${jobs.filter((j) => j.status === "done").length})`],
+              ["Tokeny wejściowe", fmtInt(jobs.reduce((s, j) => s + Number(j.total_input_tokens ?? 0), 0))],
+              ["Tokeny wyjściowe", fmtInt(jobs.reduce((s, j) => s + Number(j.total_output_tokens ?? 0), 0))],
+              ["Koszt projektu", fmtCost(jobs.reduce((s, j) => s + Number(j.total_cost ?? 0), 0))],
+            ].map(([label, value]) => (
+              <Card key={label as string} className="p-3">
+                <p className="text-[11px] uppercase tracking-wide text-zinc-500">{label}</p>
+                <p className="text-lg font-bold">{value}</p>
+              </Card>
+            ))}
+          </div>
           <div className="flex flex-wrap gap-2">
             <Button onClick={() => setShowJobForm((v) => !v)}>+ Nowe zapytanie</Button>
             <Button variant="success" onClick={runAllPending} disabled={runningJobs.size > 0}>

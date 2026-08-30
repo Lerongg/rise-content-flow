@@ -13,7 +13,7 @@ import {
   Spinner,
   Textarea,
 } from "@/components/ui";
-import { api, fmtDate } from "@/lib/fetcher";
+import { api, fmtCost, fmtDate } from "@/lib/fetcher";
 import { ClientRow } from "@/lib/types";
 
 interface ClientDetail extends ClientRow {
@@ -35,12 +35,19 @@ export default function ClientPage({ params }: { params: Promise<{ id: string }>
   const [busy, setBusy] = useState(false);
   const [extraJsonText, setExtraJsonText] = useState("{}");
   const [projectName, setProjectName] = useState("");
+  const [projectCosts, setProjectCosts] = useState<Record<string, number>>({});
 
   async function load() {
     try {
       const data = await api<ClientDetail>(`/api/clients/${id}`);
       setClient(data);
       setExtraJsonText(JSON.stringify(data.extra_json ?? {}, null, 2));
+      const costs = await api<{ perProject: Array<{ project_id: string; cost: number }> }>(
+        "/api/costs"
+      );
+      setProjectCosts(
+        Object.fromEntries(costs.perProject.map((p) => [p.project_id, p.cost]))
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Błąd ładowania");
     }
@@ -166,7 +173,7 @@ export default function ClientPage({ params }: { params: Promise<{ id: string }>
                     {p.name}
                   </Link>
                   <span className="text-xs text-zinc-500">
-                    {p.jobs?.[0]?.count ?? 0} zapytań · {fmtDate(p.created_at)}
+                    {p.jobs?.[0]?.count ?? 0} zapytań · koszt {fmtCost(projectCosts[p.id])} · {fmtDate(p.created_at)}
                   </span>
                 </li>
               ))}
