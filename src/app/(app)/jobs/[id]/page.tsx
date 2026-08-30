@@ -15,6 +15,7 @@ import {
 } from "@/components/ui";
 import { api, fmtCost, fmtDate, fmtInt } from "@/lib/fetcher";
 import { runJob } from "@/lib/runner";
+import { copyRichText, outputToHtml } from "@/lib/richtext";
 import { JobRow, StageRow, StageRunRow, VariableDef } from "@/lib/types";
 
 interface JobDetail extends JobRow {
@@ -27,6 +28,65 @@ interface JobDetail extends JobRow {
   };
   runs: StageRunRow[];
   stages: (StageRow & { models: { name: string; provider: string; model_id: string } | null })[];
+}
+
+function FinalOutputCard({ runs }: { runs: StageRunRow[] }) {
+  const [copied, setCopied] = useState<"rich" | "raw" | null>(null);
+  const [showPreview, setShowPreview] = useState(true);
+  const successes = runs.filter((r) => r.status === "success" && r.output);
+  const last = successes[successes.length - 1];
+  if (!last?.output) return null;
+  const output = last.output;
+
+  async function copy(kind: "rich" | "raw") {
+    try {
+      if (kind === "rich") await copyRichText(outputToHtml(output), output);
+      else await navigator.clipboard.writeText(output);
+      setCopied(kind);
+      setTimeout(() => setCopied(null), 2500);
+    } catch {
+      alert("Nie udało się skopiować do schowka.");
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader
+        title={`Wynik końcowy (etap ${last.position} — ${last.stage_name})`}
+        actions={
+          <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={() => setShowPreview((v) => !v)}>
+              {showPreview ? "Ukryj podgląd" : "Pokaż podgląd"}
+            </Button>
+            <Button variant="secondary" onClick={() => copy("raw")}>
+              {copied === "raw" ? "Skopiowano ✓" : "Kopiuj źródło"}
+            </Button>
+            <Button onClick={() => copy("rich")}>
+              {copied === "rich" ? "Skopiowano ✓" : "📋 Kopiuj do Google Docs"}
+            </Button>
+          </div>
+        }
+      />
+      {showPreview && (
+        <div
+          className="max-h-[32rem] overflow-auto px-6 py-4 text-sm leading-relaxed
+            [&_h1]:mb-3 [&_h1]:mt-2 [&_h1]:text-2xl [&_h1]:font-bold
+            [&_h2]:mb-2 [&_h2]:mt-5 [&_h2]:text-xl [&_h2]:font-bold
+            [&_h3]:mb-2 [&_h3]:mt-4 [&_h3]:text-base [&_h3]:font-semibold
+            [&_p]:mb-3 [&_ul]:mb-3 [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:mb-3 [&_ol]:list-decimal [&_ol]:pl-6
+            [&_li]:mb-1 [&_blockquote]:border-l-4 [&_blockquote]:border-indigo-300 [&_blockquote]:pl-3 [&_blockquote]:italic
+            [&_table]:mb-3 [&_table]:w-full [&_table]:border-collapse
+            [&_td]:border [&_td]:border-zinc-300 [&_td]:px-2 [&_td]:py-1 dark:[&_td]:border-zinc-700
+            [&_th]:border [&_th]:border-zinc-300 [&_th]:bg-zinc-100 [&_th]:px-2 [&_th]:py-1 dark:[&_th]:border-zinc-700 dark:[&_th]:bg-zinc-800"
+          dangerouslySetInnerHTML={{ __html: outputToHtml(output) }}
+        />
+      )}
+      <p className="border-t border-zinc-100 px-4 py-2 text-[11px] text-zinc-500 dark:border-zinc-900">
+        „Kopiuj do Google Docs" wkłada do schowka tekst z formatowaniem (nagłówki, listy, tabele)
+        — wklej w Google Docs przez zwykłe Ctrl+V. „Kopiuj źródło" kopiuje surowy Markdown/HTML.
+      </p>
+    </Card>
+  );
 }
 
 function JsonBlock({ title, data }: { title: string; data: unknown }) {
@@ -221,6 +281,8 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
           </a>
         </Card>
       )}
+
+      <FinalOutputCard runs={job.runs} />
 
       <Card>
         <CardHeader
