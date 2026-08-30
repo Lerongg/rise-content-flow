@@ -30,39 +30,59 @@ function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
 
+// Przejściowe błędy dostawców (przeciążenie, rate limit) — ponawiamy z odczekaniem
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 529]);
+const RETRY_DELAYS_MS = [10_000, 25_000];
+
 async function doFetch(
   url: string,
   headers: Record<string, string>,
   body: Record<string, unknown>,
   timeoutMs: number
 ): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...headers },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    const text = await res.text();
-    let json: unknown;
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt - 1]));
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      json = JSON.parse(text);
-    } catch {
-      json = { raw: text };
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = { raw: text };
+      }
+      if (!res.ok) {
+        const err = new Error(
+          `Provider HTTP ${res.status}: ${text.slice(0, 2000)}`
+        ) as Error & { responsePayload?: unknown; retryable?: boolean };
+        err.responsePayload = json;
+        if (RETRYABLE_STATUSES.has(res.status)) {
+          lastError = err;
+          continue; // ponów po odczekaniu
+        }
+        throw err;
+      }
+      return json;
+    } catch (e) {
+      if (e instanceof Error && e.name === "AbortError") throw e;
+      if ((e as { responsePayload?: unknown }).responsePayload !== undefined) throw e;
+      // błąd sieciowy (fetch failed) — też ponawiamy
+      lastError = e;
+    } finally {
+      clearTimeout(timer);
     }
-    if (!res.ok) {
-      const err = new Error(
-        `Provider HTTP ${res.status}: ${text.slice(0, 2000)}`
-      ) as Error & { responsePayload?: unknown };
-      err.responsePayload = json;
-      throw err;
-    }
-    return json;
-  } finally {
-    clearTimeout(timer);
   }
+  throw lastError;
 }
 
 export async function callLlm(model: ModelRow, opts: LlmCallOptions): Promise<LlmResult> {
