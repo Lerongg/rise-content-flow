@@ -122,7 +122,10 @@ function ReviewPanel({
 function FinalOutputCard({ runs }: { runs: StageRunRow[] }) {
   const [copied, setCopied] = useState<"rich" | "raw" | null>(null);
   const [showPreview, setShowPreview] = useState(true);
-  const successes = runs.filter((r) => r.status === "success" && r.output);
+  // Pomijamy wyjścia fact-checkera (JSON ze zgłoszeniami) — wynik końcowy to treść
+  const successes = runs.filter(
+    (r) => r.status === "success" && r.output && parseFactIssues(r.output) === null
+  );
   const last = successes[successes.length - 1];
   if (!last?.output) return null;
   const output = last.output;
