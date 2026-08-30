@@ -3,6 +3,9 @@ import { api } from "./fetcher";
 export interface RunStageResult {
   done?: boolean;
   stopped?: boolean;
+  /** Weryfikator znalazł problemy — zapytanie czeka na decyzje w panelu Fixera. */
+  review?: boolean;
+  issues?: number;
   error?: string;
   position?: number;
   totalStages?: number;
@@ -17,7 +20,7 @@ export interface RunStageResult {
 export async function runJob(
   jobId: string,
   onProgress?: (r: RunStageResult) => void
-): Promise<"done" | "stopped" | "error"> {
+): Promise<"done" | "stopped" | "error" | "review"> {
   await api(`/api/jobs/${jobId}/control`, { method: "POST", json: { action: "start" } });
   for (;;) {
     let result: RunStageResult;
@@ -29,6 +32,7 @@ export async function runJob(
     }
     onProgress?.(result);
     if (result.stopped) return "stopped";
+    if (result.review) return "review";
     if (result.done) return "done";
   }
 }

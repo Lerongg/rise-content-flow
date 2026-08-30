@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { db, logEvent } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 import { buildContext, interpolate } from "@/lib/interpolate";
+import { isFixerStage, parseFactIssues } from "@/lib/factcheck";
 import { calcCost, callLlm } from "@/lib/providers";
 import { publishWpDraft } from "@/lib/wordpress";
 import { maskModel } from "@/lib/maskModel";
@@ -58,6 +59,72 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
   }
 
   const stage = enabledStages[job.current_position];
+  const stagePosition = job.current_position + 1; // 1-based, matches [OUTPUT_N]
+
+  // Outputs of previous stages (latest successful attempt per position)
+  const { data: prevRuns } = await db()
+    .from("stage_runs")
+    .select("position, output, status")
+    .eq("job_id", jobId)
+    .eq("status", "success")
+    .order("started_at");
+  const outputs: Record<number, string> = {};
+  for (const r of (prevRuns ?? []) as Pick<StageRunRow, "position" | "output" | "status">[]) {
+    outputs[r.position] = r.output ?? "";
+  }
+
+  // Etap typu FIXER: nie wywołuje modelu. Jeśli fact-checker (poprzedni etap) znalazł
+  // problemy — job przechodzi w status "review" i czeka na decyzje użytkownika w panelu.
+  // Jeśli problemów brak — tekst przechodzi dalej bez zmian.
+  if (isFixerStage(stage.prompt)) {
+    const fcOutput = outputs[stagePosition - 1];
+    const issues = parseFactIssues(fcOutput);
+    if (issues === null) {
+      const msg = `Etap „${stage.name}”: nie udało się sparsować JSON z wynikami weryfikacji poprzedniego etapu.`;
+      await failJob(jobId, msg);
+      await logEvent("error", msg, {}, jobId);
+      return Response.json({ error: msg }, { status: 500 });
+    }
+    if (issues.length === 0) {
+      const cleanText = outputs[stagePosition - 2] ?? "";
+      const isLast = stagePosition >= enabledStages.length;
+      await db().from("stage_runs").insert({
+        job_id: jobId,
+        stage_id: stage.id,
+        position: stagePosition,
+        stage_name: stage.name,
+        status: "success",
+        rendered_prompt:
+          "(Weryfikator nie znalazł problemów — tekst przechodzi dalej bez zmian.)",
+        output: cleanText,
+        finished_at: new Date().toISOString(),
+      });
+      await db()
+        .from("jobs")
+        .update({
+          current_position: stagePosition,
+          ...(isLast ? { status: "done", finished_at: new Date().toISOString() } : {}),
+        })
+        .eq("id", jobId);
+      return Response.json({
+        done: isLast,
+        position: stagePosition,
+        totalStages: enabledStages.length,
+        stageName: stage.name,
+        inputTokens: 0,
+        outputTokens: 0,
+        cost: 0,
+      });
+    }
+    await db().from("jobs").update({ status: "review" }).eq("id", jobId);
+    await logEvent(
+      "info",
+      `Weryfikator znalazł ${issues.length} problem(y) — zapytanie czeka na decyzje w panelu.`,
+      {},
+      jobId
+    );
+    return Response.json({ review: true, issues: issues.length, position: stagePosition });
+  }
 
   // Resolve the stage's model
   if (!stage.model_id) {
@@ -78,21 +145,11 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
   const model = modelData as ModelRow;
 
   // Build variable context: client fields + job variables + previous outputs
-  const { data: prevRuns } = await db()
-    .from("stage_runs")
-    .select("position, output, status")
-    .eq("job_id", jobId)
-    .eq("status", "success")
-    .order("started_at");
-  const outputs: Record<number, string> = {};
-  for (const r of (prevRuns ?? []) as Pick<StageRunRow, "position" | "output" | "status">[]) {
-    outputs[r.position] = r.output ?? "";
-  }
   const client = job.projects.clients;
   const ctxMap = buildContext(client, job.variables ?? {}, outputs);
+  ctxMap["OUTPUT_POPRZEDNI"] = outputs[stagePosition - 1] ?? "";
   const { text: renderedPrompt, missing } = interpolate(stage.prompt, ctxMap);
 
-  const stagePosition = job.current_position + 1; // 1-based, matches [OUTPUT_N]
   const { data: attemptData } = await db()
     .from("stage_runs")
     .select("attempt")

@@ -68,7 +68,7 @@ export interface StageRow {
   created_at: string;
 }
 
-export type JobStatus = "pending" | "running" | "stopped" | "error" | "done";
+export type JobStatus = "pending" | "running" | "stopped" | "error" | "done" | "review";
 
 export interface JobRow {
   id: string;

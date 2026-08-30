@@ -16,6 +16,7 @@ import {
 import { api, fmtCost, fmtDate, fmtInt } from "@/lib/fetcher";
 import { runJob } from "@/lib/runner";
 import { copyRichText, outputToHtml } from "@/lib/richtext";
+import { FactIssue, FixAction, parseFactIssues } from "@/lib/factcheck";
 import { JobRow, StageRow, StageRunRow, VariableDef } from "@/lib/types";
 
 interface JobDetail extends JobRow {
@@ -28,6 +29,94 @@ interface JobDetail extends JobRow {
   };
   runs: StageRunRow[];
   stages: (StageRow & { models: { name: string; provider: string; model_id: string } | null })[];
+}
+
+function ReviewPanel({
+  issues,
+  onSubmit,
+  busy,
+}: {
+  issues: FactIssue[];
+  onSubmit: (decisions: Array<{ index: number; action: FixAction; userSuggestion?: string }>) => void;
+  busy: boolean;
+}) {
+  const [actions, setActions] = useState<Record<number, FixAction>>({});
+  const [suggestions, setSuggestions] = useState<Record<number, string>>({});
+
+  return (
+    <Card className="border-purple-300 dark:border-purple-800">
+      <CardHeader
+        title={`🔎 Weryfikacja faktów — ${issues.length} zgłoszeń do decyzji`}
+        actions={
+          <Button
+            disabled={busy}
+            onClick={() =>
+              onSubmit(
+                issues.map((_, i) => ({
+                  index: i,
+                  action: actions[i] ?? "ignore",
+                  userSuggestion: suggestions[i],
+                }))
+              )
+            }
+          >
+            {busy ? "Stosowanie…" : "Zastosuj decyzje"}
+          </Button>
+        }
+      />
+      <div className="space-y-4 p-4">
+        <p className="text-xs text-zinc-500">
+          Fact-checker znalazł poniższe problemy. Zdecyduj dla każdego: zignoruj, napraw wedle
+          sugestii AI albo podaj własną poprawkę. Po zastosowaniu poprawek tekst wróci do
+          weryfikatora w celu ponownego sprawdzenia.
+        </p>
+        {issues.map((issue, i) => {
+          const action = actions[i] ?? "ignore";
+          return (
+            <div key={i} className="space-y-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+              <p className="text-xs font-semibold text-zinc-500">Fragment z problemem:</p>
+              <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded bg-zinc-100 p-2 text-xs dark:bg-zinc-950">
+                {issue.paragraf}
+              </pre>
+              <p className="text-sm">
+                <span className="font-semibold text-red-600">Dlaczego to błąd:</span> {issue.powod}
+              </p>
+              <p className="text-sm">
+                <span className="font-semibold text-emerald-600">Sugestia AI:</span> {issue.poprawka}
+              </p>
+              <div className="flex flex-wrap gap-4 pt-1 text-sm">
+                {(
+                  [
+                    ["ignore", "Zignoruj"],
+                    ["ai", "Napraw wedle sugestii AI"],
+                    ["user", "Popraw wedle własnej sugestii"],
+                  ] as [FixAction, string][]
+                ).map(([value, label]) => (
+                  <label key={value} className="flex items-center gap-1.5">
+                    <input
+                      type="radio"
+                      name={`issue-${i}`}
+                      checked={action === value}
+                      onChange={() => setActions((a) => ({ ...a, [i]: value }))}
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+              {action === "user" && (
+                <Textarea
+                  rows={3}
+                  placeholder="Twoja wytyczna / poprawka — AI przepisze fragment zgodnie z nią"
+                  value={suggestions[i] ?? ""}
+                  onChange={(e) => setSuggestions((s) => ({ ...s, [i]: e.target.value }))}
+                />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
 }
 
 function FinalOutputCard({ runs }: { runs: StageRunRow[] }) {
@@ -209,6 +298,33 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
   const canResume =
     (job.status === "stopped" || job.status === "error") && job.current_position > 0;
 
+  // Fixer review: issues come from the fact-checker run (1-based position = current_position)
+  const reviewIssues =
+    job.status === "review"
+      ? parseFactIssues(
+          (runsByPosition.get(job.current_position) ?? []).slice(-1)[0]?.output
+        )
+      : null;
+
+  async function submitDecisions(
+    decisions: Array<{ index: number; action: FixAction; userSuggestion?: string }>
+  ) {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api<{ reverify?: boolean; done?: boolean }>(`/api/jobs/${id}/fix`, {
+        method: "POST",
+        json: { decisions },
+      });
+      await load();
+      if (!res.done) void start(); // kontynuuj workflow (ponowna weryfikacja / dalsze etapy)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Błąd stosowania poprawek");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -258,6 +374,10 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
 
       <ErrorBox message={error} />
       {job.error && <ErrorBox message={`Błąd workflow: ${job.error}`} />}
+
+      {job.status === "review" && reviewIssues && reviewIssues.length > 0 && (
+        <ReviewPanel issues={reviewIssues} busy={busy} onSubmit={submitDecisions} />
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {[

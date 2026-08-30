@@ -1,5 +1,6 @@
 import { ModelRow } from "./types";
 import { sanitizeParams } from "./modelCaps";
+import { WEB_SEARCH_MARKER } from "./factcheck";
 
 export interface LlmCallOptions {
   prompt: string;
@@ -9,6 +10,8 @@ export interface LlmCallOptions {
   thinkingLevel?: string | null;
   maxOutputTokens?: number | null;
   timeoutMs?: number;
+  /** Włącz wyszukiwanie w internecie (Gemini: Google Search grounding; Perplexity: natywne). */
+  webSearch?: boolean;
 }
 
 export interface LlmResult {
@@ -69,6 +72,15 @@ export async function callLlm(model: ModelRow, opts: LlmCallOptions): Promise<Ll
     );
   }
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  // Znacznik [SZUKAJ_W_INTERNECIE] w promptcie włącza wyszukiwanie i jest usuwany z treści
+  if (opts.prompt.includes(WEB_SEARCH_MARKER)) {
+    opts = {
+      ...opts,
+      prompt: opts.prompt.split(WEB_SEARCH_MARKER).join("").trim(),
+      webSearch: true,
+    };
+  }
 
   // Przytnij parametry do możliwości modelu (np. modele reasoningowe OpenAI
   // nie przyjmują temperature/top_p poza poziomem "none").
@@ -138,6 +150,7 @@ async function callGemini(
   const body: Record<string, unknown> = {
     contents: [{ role: "user", parts: [{ text: opts.prompt }] }],
     ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
+    ...(opts.webSearch ? { tools: [{ google_search: {} }] } : {}),
   };
 
   const json = (await doFetch(url, { "x-goog-api-key": model.api_key! }, body, timeoutMs)) as {

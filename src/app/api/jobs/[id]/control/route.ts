@@ -26,7 +26,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     case "start":
     case "resume": {
       if (j.status === "running") {
-        return Response.json({ error: "Zapytanie już jest uruchomione" }, { status: 409 });
+        // idempotentnie: runner może kontynuować pętlę bez błędu
+        return Response.json(j);
       }
       const { data: project } = await db()
         .from("projects")

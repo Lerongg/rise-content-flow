@@ -39,6 +39,16 @@ export function buildContext(
     ctx[`OUTPUT_${pos}`] = out ?? "";
   }
 
+  // Current date (for fact-checking prompts): [AKTUALNA_DATA] = "sierpień 2026"
+  const months = [
+    "styczeń", "luty", "marzec", "kwiecień", "maj", "czerwiec",
+    "lipiec", "sierpień", "wrzesień", "październik", "listopad", "grudzień",
+  ];
+  const now = new Date();
+  ctx["AKTUALNA_DATA"] = `${months[now.getMonth()]} ${now.getFullYear()}`;
+  ctx["AKTUALNY_ROK"] = String(now.getFullYear());
+  ctx["AKTUALNY_MIESIAC"] = months[now.getMonth()];
+
   return ctx;
 }
 
