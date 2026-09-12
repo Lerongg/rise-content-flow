@@ -345,9 +345,14 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
         </div>
         <div className="flex flex-wrap gap-2">
           {isRunning ? (
-            <Button variant="secondary" onClick={() => control("stop")} disabled={busy}>
-              ⏹ Zatrzymaj
-            </Button>
+            <>
+              <Button variant="success" onClick={start} disabled={busy}>
+                ▶ Wznów przetwarzanie
+              </Button>
+              <Button variant="secondary" onClick={() => control("stop")} disabled={busy}>
+                ⏹ Zatrzymaj
+              </Button>
+            </>
           ) : (
             <>
               <Button variant="success" onClick={start} disabled={busy}>

@@ -282,6 +282,150 @@ async function callAnthropic(
   };
 }
 
+// ===== OpenAI background mode (Responses API) =====
+// Generacja liczy się po stronie OpenAI bez ograniczeń czasowych platformy;
+// aplikacja zleca zadanie i krótko odpytuje o status w kolejnych wywołaniach.
+
+interface ResponsesApiResult {
+  id?: string;
+  status?: string; // queued | in_progress | completed | failed | cancelled | incomplete
+  error?: { message?: string } | null;
+  incomplete_details?: { reason?: string } | null;
+  output?: Array<{
+    type: string;
+    content?: Array<{ type: string; text?: string }>;
+  }>;
+  usage?: { input_tokens?: number; output_tokens?: number };
+}
+
+function buildResponsesBody(model: ModelRow, opts: LlmCallOptions): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model: model.model_id,
+    input: opts.prompt,
+    background: true,
+    store: true,
+  };
+  if (opts.temperature != null) body.temperature = opts.temperature;
+  if (opts.topP != null) body.top_p = opts.topP;
+  if (opts.maxOutputTokens != null) body.max_output_tokens = opts.maxOutputTokens;
+  if (opts.thinkingLevel) body.reasoning = { effort: opts.thinkingLevel.toLowerCase() };
+  return body;
+}
+
+function extractResponsesOutput(json: ResponsesApiResult): {
+  output: string;
+  inputTokens: number;
+  outputTokens: number;
+} {
+  const output = (json.output ?? [])
+    .filter((i) => i.type === "message")
+    .flatMap((m) => m.content ?? [])
+    .filter((c) => c.type === "output_text")
+    .map((c) => c.text ?? "")
+    .join("");
+  return {
+    output,
+    inputTokens: num(json.usage?.input_tokens),
+    outputTokens: num(json.usage?.output_tokens),
+  };
+}
+
+/** Zleca generację w tle. Zwraca id odpowiedzi do odpytywania. */
+export async function startOpenAiBackground(
+  model: ModelRow,
+  opts: LlmCallOptions
+): Promise<{ responseId: string; requestPayload: Record<string, unknown> }> {
+  if (!model.api_key) {
+    throw new Error(`Model "${model.name}" nie ma ustawionego klucza API.`);
+  }
+  // sanityzacja parametrów jak w callLlm
+  let prompt = opts.prompt;
+  if (prompt.includes(WEB_SEARCH_MARKER)) prompt = prompt.split(WEB_SEARCH_MARKER).join("").trim();
+  const sane = sanitizeParams(model.provider, model.model_id, {
+    temperature: opts.temperature,
+    topK: opts.topK,
+    topP: opts.topP,
+    thinkingLevel: opts.thinkingLevel,
+  });
+  const body = buildResponsesBody(model, {
+    ...opts,
+    prompt,
+    temperature: sane.temperature,
+    topP: sane.topP,
+    thinkingLevel: sane.thinkingLevel,
+  });
+  const base = (model.base_url?.replace(/\/+$/, "") || "https://api.openai.com/v1").replace(
+    /\/chat\/completions$/,
+    ""
+  );
+  const url = `${base}/responses`;
+  const json = (await doFetch(
+    url,
+    { authorization: `Bearer ${model.api_key}` },
+    body,
+    60_000
+  )) as ResponsesApiResult;
+  if (!json.id) throw new Error("OpenAI nie zwróciło id odpowiedzi background.");
+  return {
+    responseId: json.id,
+    requestPayload: {
+      url,
+      method: "POST",
+      body,
+      tryb: "background",
+      ...(sane.dropped.length ? { pominiete_parametry: sane.dropped } : {}),
+    },
+  };
+}
+
+export type BackgroundPoll =
+  | { status: "pending" }
+  | { status: "failed"; error: string; responsePayload: unknown }
+  | { status: "completed"; result: Omit<LlmResult, "requestPayload"> };
+
+/** Odpytuje status generacji w tle. */
+export async function pollOpenAiBackground(
+  model: ModelRow,
+  responseId: string
+): Promise<BackgroundPoll> {
+  const base = (model.base_url?.replace(/\/+$/, "") || "https://api.openai.com/v1").replace(
+    /\/chat\/completions$/,
+    ""
+  );
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const res = await fetch(`${base}/responses/${responseId}`, {
+      headers: { authorization: `Bearer ${model.api_key}` },
+      signal: controller.signal,
+    });
+    const json = (await res.json()) as ResponsesApiResult;
+    if (!res.ok) {
+      return {
+        status: "failed",
+        error: `Provider HTTP ${res.status}: ${JSON.stringify(json).slice(0, 1000)}`,
+        responsePayload: json,
+      };
+    }
+    if (json.status === "completed") {
+      return { status: "completed", result: { ...extractResponsesOutput(json), responsePayload: json } };
+    }
+    if (json.status === "failed" || json.status === "cancelled" || json.status === "incomplete") {
+      return {
+        status: "failed",
+        error:
+          json.error?.message ??
+          json.incomplete_details?.reason ??
+          `Generacja zakończona statusem: ${json.status}`,
+        responsePayload: json,
+      };
+    }
+    return { status: "pending" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function calcCost(model: ModelRow, inputTokens: number, outputTokens: number): number {
   return (
     (inputTokens / 1_000_000) * (model.input_cost_per_1m ?? 0) +

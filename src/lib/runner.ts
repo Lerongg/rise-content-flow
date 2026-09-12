@@ -6,6 +6,8 @@ export interface RunStageResult {
   /** Weryfikator znalazł problemy — zapytanie czeka na decyzje w panelu Fixera. */
   review?: boolean;
   issues?: number;
+  /** Generacja trwa w tle (OpenAI background) — odpytaj ponownie za chwilę. */
+  pending?: boolean;
   error?: string;
   position?: number;
   totalStages?: number;
@@ -34,5 +36,9 @@ export async function runJob(
     if (result.stopped) return "stopped";
     if (result.review) return "review";
     if (result.done) return "done";
+    if (result.pending) {
+      // generacja w tle — odpytaj ponownie za 10 s
+      await new Promise((r) => setTimeout(r, 10_000));
+    }
   }
 }

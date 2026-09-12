@@ -3,7 +3,12 @@ import { db, logEvent } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 import { buildContext, interpolate } from "@/lib/interpolate";
 import { isFixerStage, parseFactIssues } from "@/lib/factcheck";
-import { calcCost, callLlm } from "@/lib/providers";
+import {
+  calcCost,
+  callLlm,
+  pollOpenAiBackground,
+  startOpenAiBackground,
+} from "@/lib/providers";
 import { publishWpDraft } from "@/lib/wordpress";
 import { maskModel } from "@/lib/maskModel";
 import { ClientRow, JobRow, ModelRow, StageRow, StageRunRow } from "@/lib/types";
@@ -75,7 +80,21 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
     })
     .eq("job_id", jobId)
     .eq("status", "running")
+    .is("request_payload->>background_response_id", null)
     .lt("started_at", staleCutoff);
+  // Generacje w tle (OpenAI background) mogą legalnie trwać długo — sprzątamy dopiero po 2h
+  const bgStaleCutoff = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+  await db()
+    .from("stage_runs")
+    .update({
+      status: "error",
+      error: "Przerwane — generacja w tle nie zakończyła się w ciągu 2 godzin.",
+      finished_at: new Date().toISOString(),
+    })
+    .eq("job_id", jobId)
+    .eq("status", "running")
+    .not("request_payload->>background_response_id", "is", null)
+    .lt("started_at", bgStaleCutoff);
 
   // Outputs of previous stages (latest successful attempt per position)
   const { data: prevRuns } = await db()
@@ -159,9 +178,115 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
     return Response.json({ error: msg }, { status: 400 });
   }
   const model = modelData as ModelRow;
+  const client = job.projects.clients;
+  const isLastStage = stagePosition >= enabledStages.length;
+
+  // Wspólna finalizacja sukcesu (ścieżka synchroniczna i background)
+  async function finalizeSuccess(
+    runId: string,
+    result: { output: string; inputTokens: number; outputTokens: number; responsePayload: unknown },
+    requestPayload?: Record<string, unknown>
+  ) {
+    const cost = calcCost(model, result.inputTokens, result.outputTokens);
+
+    let wpDraftUrl: string | null = null;
+    let wpError: string | null = null;
+    if (stage.publish_wp_draft && client.wp_enabled) {
+      try {
+        const title =
+          job.name || job.variables?.["SŁOWO_KLUCZOWE"] || `Rise Content Flow ${jobId.slice(0, 8)}`;
+        const wp = await publishWpDraft(client, title, result.output);
+        wpDraftUrl = wp.url;
+      } catch (e) {
+        wpError = e instanceof Error ? e.message : String(e);
+        await logEvent("warn", `Nie udało się utworzyć draftu WP: ${wpError}`, {}, jobId);
+      }
+    }
+
+    await db()
+      .from("stage_runs")
+      .update({
+        status: "success",
+        ...(requestPayload ? { request_payload: requestPayload } : {}),
+        response_payload: result.responsePayload,
+        output: result.output,
+        input_tokens: result.inputTokens,
+        output_tokens: result.outputTokens,
+        cost,
+        finished_at: new Date().toISOString(),
+        error: wpError ? `Draft WP: ${wpError}` : null,
+      })
+      .eq("id", runId);
+
+    await db()
+      .from("jobs")
+      .update({
+        current_position: stagePosition,
+        total_input_tokens: (job.total_input_tokens ?? 0) + result.inputTokens,
+        total_output_tokens: (job.total_output_tokens ?? 0) + result.outputTokens,
+        total_cost: Number(job.total_cost ?? 0) + cost,
+        ...(wpDraftUrl ? { wp_draft_url: wpDraftUrl } : {}),
+        ...(isLastStage ? { status: "done", finished_at: new Date().toISOString() } : {}),
+      })
+      .eq("id", jobId);
+
+    return Response.json({
+      done: isLastStage,
+      position: stagePosition,
+      totalStages: enabledStages.length,
+      stageName: stage.name,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      cost,
+    });
+  }
+
+  async function finalizeError(runId: string, message: string, responsePayload: unknown) {
+    await db()
+      .from("stage_runs")
+      .update({
+        status: "error",
+        error: message,
+        response_payload: responsePayload,
+        finished_at: new Date().toISOString(),
+      })
+      .eq("id", runId);
+    await failJob(jobId, `Etap ${stagePosition} („${stage.name}”): ${message}`);
+    await logEvent("error", `Błąd etapu „${stage.name}”: ${message}`, { stagePosition }, jobId);
+    return Response.json({ error: message, position: stagePosition }, { status: 500 });
+  }
+
+  // OpenAI background: jeśli generacja tego etapu jest już zlecona — tylko odpytaj status
+  if (model.provider === "openai") {
+    const { data: bgRuns } = await db()
+      .from("stage_runs")
+      .select("*")
+      .eq("job_id", jobId)
+      .eq("position", stagePosition)
+      .eq("status", "running")
+      .order("started_at", { ascending: false })
+      .limit(1);
+    const bgRun = bgRuns?.[0] as StageRunRow | undefined;
+    const bgId = (bgRun?.request_payload as { background_response_id?: string } | null)
+      ?.background_response_id;
+    if (bgRun && bgId) {
+      const poll = await pollOpenAiBackground(model, bgId);
+      if (poll.status === "pending") {
+        return Response.json({
+          pending: true,
+          position: stagePosition,
+          totalStages: enabledStages.length,
+          stageName: stage.name,
+        });
+      }
+      if (poll.status === "failed") {
+        return finalizeError(bgRun.id, poll.error, poll.responsePayload);
+      }
+      return finalizeSuccess(bgRun.id, poll.result);
+    }
+  }
 
   // Build variable context: client fields + job variables + previous outputs
-  const client = job.projects.clients;
   const ctxMap = buildContext(client, job.variables ?? {}, outputs);
   ctxMap["OUTPUT_POPRZEDNI"] = outputs[stagePosition - 1] ?? "";
   const { text: renderedPrompt, missing } = interpolate(stage.prompt, ctxMap);
@@ -208,6 +333,45 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
     );
   }
 
+  // OpenAI: zleć generację w tle (Responses API, background: true) — limit czasu
+  // platformy przestaje obowiązywać; kolejne wywołania run-stage odpytują status.
+  if (model.provider === "openai") {
+    try {
+      const { responseId, requestPayload } = await startOpenAiBackground(model, {
+        prompt: renderedPrompt,
+        temperature: stage.temperature,
+        topK: stage.top_k,
+        topP: stage.top_p,
+        thinkingLevel: stage.thinking_level,
+        maxOutputTokens: stage.max_output_tokens,
+      });
+      await db()
+        .from("stage_runs")
+        .update({ request_payload: { ...requestPayload, background_response_id: responseId } })
+        .eq("id", runId);
+      await logEvent(
+        "info",
+        `Etap „${stage.name}”: generacja zlecona w tle (OpenAI background, ${responseId})`,
+        {},
+        jobId
+      );
+      return Response.json({
+        pending: true,
+        position: stagePosition,
+        totalStages: enabledStages.length,
+        stageName: stage.name,
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      return finalizeError(
+        runId,
+        message,
+        (e as { responsePayload?: unknown })?.responsePayload ?? null
+      );
+    }
+  }
+
+  // Pozostali dostawcy: wywołanie synchroniczne
   try {
     const result = await callLlm(model, {
       prompt: renderedPrompt,
@@ -221,8 +385,6 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
       timeoutMs: 280_000,
     });
 
-    const cost = calcCost(model, result.inputTokens, result.outputTokens);
-
     const droppedParams = (result.requestPayload as { pominiete_parametry?: string[] })
       .pominiete_parametry;
     if (droppedParams?.length) {
@@ -234,58 +396,7 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
       );
     }
 
-    // Optional: publish the stage output as a WordPress draft
-    let wpDraftUrl: string | null = null;
-    let wpError: string | null = null;
-    if (stage.publish_wp_draft && client.wp_enabled) {
-      try {
-        const title =
-          job.name || job.variables?.["SŁOWO_KLUCZOWE"] || `Rise Content Flow ${jobId.slice(0, 8)}`;
-        const wp = await publishWpDraft(client, title, result.output);
-        wpDraftUrl = wp.url;
-      } catch (e) {
-        wpError = e instanceof Error ? e.message : String(e);
-        await logEvent("warn", `Nie udało się utworzyć draftu WP: ${wpError}`, {}, jobId);
-      }
-    }
-
-    await db()
-      .from("stage_runs")
-      .update({
-        status: "success",
-        request_payload: result.requestPayload,
-        response_payload: result.responsePayload,
-        output: result.output,
-        input_tokens: result.inputTokens,
-        output_tokens: result.outputTokens,
-        cost,
-        finished_at: new Date().toISOString(),
-        error: wpError ? `Draft WP: ${wpError}` : null,
-      })
-      .eq("id", runId);
-
-    const isLast = stagePosition >= enabledStages.length;
-    await db()
-      .from("jobs")
-      .update({
-        current_position: stagePosition,
-        total_input_tokens: (job.total_input_tokens ?? 0) + result.inputTokens,
-        total_output_tokens: (job.total_output_tokens ?? 0) + result.outputTokens,
-        total_cost: Number(job.total_cost ?? 0) + cost,
-        ...(wpDraftUrl ? { wp_draft_url: wpDraftUrl } : {}),
-        ...(isLast ? { status: "done", finished_at: new Date().toISOString() } : {}),
-      })
-      .eq("id", jobId);
-
-    return Response.json({
-      done: isLast,
-      position: stagePosition,
-      totalStages: enabledStages.length,
-      stageName: stage.name,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      cost,
-    });
+    return finalizeSuccess(runId, result, result.requestPayload);
   } catch (e) {
     const message =
       e instanceof Error && e.name === "AbortError"
@@ -293,19 +404,11 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
         : e instanceof Error
           ? e.message
           : String(e);
-    const responsePayload = (e as { responsePayload?: unknown })?.responsePayload ?? null;
-    await db()
-      .from("stage_runs")
-      .update({
-        status: "error",
-        error: message,
-        response_payload: responsePayload,
-        finished_at: new Date().toISOString(),
-      })
-      .eq("id", runId);
-    await failJob(jobId, `Etap ${stagePosition} („${stage.name}”): ${message}`);
-    await logEvent("error", `Błąd etapu „${stage.name}”: ${message}`, { stagePosition }, jobId);
-    return Response.json({ error: message, position: stagePosition }, { status: 500 });
+    return finalizeError(
+      runId,
+      message,
+      (e as { responsePayload?: unknown })?.responsePayload ?? null
+    );
   }
 }
 
