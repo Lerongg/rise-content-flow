@@ -61,6 +61,22 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
   const stage = enabledStages[job.current_position];
   const stagePosition = job.current_position + 1; // 1-based, matches [OUTPUT_N]
 
+  // Sprzątanie "zombie runs": jeśli poprzednie wywołanie zostało ubite przez limit
+  // czasu funkcji (Vercel), run zostaje na zawsze w statusie "running". Oznaczamy
+  // takie przebiegi (starsze niż 6 min) jako błąd, żeby zapytanie się nie zacinało.
+  const staleCutoff = new Date(Date.now() - 6 * 60_000).toISOString();
+  await db()
+    .from("stage_runs")
+    .update({
+      status: "error",
+      error:
+        "Przerwane — funkcja przekroczyła limit czasu platformy zanim zapisała wynik (zombie run).",
+      finished_at: new Date().toISOString(),
+    })
+    .eq("job_id", jobId)
+    .eq("status", "running")
+    .lt("started_at", staleCutoff);
+
   // Outputs of previous stages (latest successful attempt per position)
   const { data: prevRuns } = await db()
     .from("stage_runs")
@@ -200,6 +216,9 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
       topP: stage.top_p,
       thinkingLevel: stage.thinking_level,
       maxOutputTokens: stage.max_output_tokens,
+      // poniżej maxDuration (300 s), żeby błąd czasu zapisał się czysto,
+      // zanim platforma ubije funkcję
+      timeoutMs: 280_000,
     });
 
     const cost = calcCost(model, result.inputTokens, result.outputTokens);
@@ -268,7 +287,12 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
       cost,
     });
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
+    const message =
+      e instanceof Error && e.name === "AbortError"
+        ? "Przekroczono limit czasu etapu (280 s). Wznów zapytanie — jeśli to się powtarza, obniż thinking level tego etapu albo wybierz szybszy model."
+        : e instanceof Error
+          ? e.message
+          : String(e);
     const responsePayload = (e as { responsePayload?: unknown })?.responsePayload ?? null;
     await db()
       .from("stage_runs")
