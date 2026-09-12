@@ -309,6 +309,7 @@ function buildResponsesBody(model: ModelRow, opts: LlmCallOptions): Record<strin
   if (opts.topP != null) body.top_p = opts.topP;
   if (opts.maxOutputTokens != null) body.max_output_tokens = opts.maxOutputTokens;
   if (opts.thinkingLevel) body.reasoning = { effort: opts.thinkingLevel.toLowerCase() };
+  if (opts.webSearch) body.tools = [{ type: "web_search" }];
   return body;
 }
 
@@ -340,7 +341,11 @@ export async function startOpenAiBackground(
   }
   // sanityzacja parametrów jak w callLlm
   let prompt = opts.prompt;
-  if (prompt.includes(WEB_SEARCH_MARKER)) prompt = prompt.split(WEB_SEARCH_MARKER).join("").trim();
+  let webSearch = opts.webSearch ?? false;
+  if (prompt.includes(WEB_SEARCH_MARKER)) {
+    prompt = prompt.split(WEB_SEARCH_MARKER).join("").trim();
+    webSearch = true;
+  }
   const sane = sanitizeParams(model.provider, model.model_id, {
     temperature: opts.temperature,
     topK: opts.topK,
@@ -350,6 +355,7 @@ export async function startOpenAiBackground(
   const body = buildResponsesBody(model, {
     ...opts,
     prompt,
+    webSearch,
     temperature: sane.temperature,
     topP: sane.topP,
     thinkingLevel: sane.thinkingLevel,
