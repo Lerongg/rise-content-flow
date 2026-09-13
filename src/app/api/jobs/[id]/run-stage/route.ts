@@ -176,7 +176,22 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     .select("*")
     .eq("id", stage.model_id)
     .single();
-  if (mErr || !modelData) {
+  // PGRST116 = brak wiersza (model faktycznie nie istnieje) — to błąd konfiguracji.
+  // Każdy inny błąd to przejściowy problem odczytu bazy: NIE ubijamy joba,
+  // zwracamy 503, żeby łańcuch/runner ponowił próbę.
+  if (mErr && mErr.code !== "PGRST116") {
+    await logEvent(
+      "warn",
+      `Etap „${stage.name}”: przejściowy błąd odczytu modelu (${mErr.message}) — ponawiam.`,
+      {},
+      jobId
+    );
+    return Response.json(
+      { error: `Chwilowy błąd odczytu bazy: ${mErr.message}` },
+      { status: 503 }
+    );
+  }
+  if (!modelData) {
     const msg = `Nie znaleziono modelu dla etapu „${stage.name}”.`;
     await failJob(jobId, msg);
     return Response.json({ error: msg }, { status: 400 });
