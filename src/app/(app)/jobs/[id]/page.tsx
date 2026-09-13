@@ -485,6 +485,26 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
   );
 }
 
+function runningInfo(run: StageRunRow): string {
+  const rp = run.request_payload as {
+    background_response_id?: string;
+    last_poll_at?: string;
+  } | null;
+  const mins = Math.max(0, Math.round((Date.now() - new Date(run.started_at).getTime()) / 60000));
+  const parts: string[] = [];
+  if (rp?.background_response_id) parts.push("generacja w tle u OpenAI");
+  parts.push(mins < 1 ? "trwa <1 min" : `trwa ${mins} min`);
+  if (rp?.last_poll_at) {
+    const secs = Math.round((Date.now() - new Date(rp.last_poll_at).getTime()) / 1000);
+    parts.push(
+      secs <= 90
+        ? `sprawdzono ${secs}s temu ✓`
+        : "łańcuch nieaktywny — strona zaraz go wskrzesi"
+    );
+  }
+  return parts.join(" · ");
+}
+
 function StageSection({
   position,
   stage,
@@ -515,6 +535,11 @@ function StageSection({
           <span className="text-sm font-semibold">{stage.name}</span>
           {isCurrent && <Spinner />}
           {run && <StatusBadge status={run.status} />}
+          {run && run.status === "running" && (
+            <span className="text-[11px] text-blue-600 dark:text-blue-400">
+              {runningInfo(run)}
+            </span>
+          )}
           {run && run.attempt > 1 && (
             <span className="text-[11px] text-zinc-500">próba {run.attempt}</span>
           )}
