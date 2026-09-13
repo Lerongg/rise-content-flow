@@ -307,6 +307,16 @@ export async function POST(req: NextRequest, ctx: Ctx) {
           null
         );
       }
+      // heartbeat: świeży last_poll_at mówi samonaprawie, że łańcuch żyje
+      await db()
+        .from("stage_runs")
+        .update({
+          request_payload: {
+            ...((activeRun.request_payload as Record<string, unknown>) ?? {}),
+            last_poll_at: new Date().toISOString(),
+          },
+        })
+        .eq("id", activeRun.id);
       if (chain) scheduleChainTick(req, jobId, 15_000);
       return Response.json({
         pending: true,
@@ -367,6 +377,28 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     .single();
   if (rErr) return Response.json({ error: rErr.message }, { status: 500 });
   const runId = (runData as StageRunRow).id;
+
+  // Rozstrzygnięcie wyścigu (dwa wywołania mogły równocześnie przejść guard wyżej):
+  // etap wykonuje wyłącznie właściciel NAJSTARSZEGO wiersza; przegrany usuwa swój
+  // i czeka — bez tego zdarzało się podwójne zlecenie tej samej generacji.
+  const { data: concurrent } = await db()
+    .from("stage_runs")
+    .select("id")
+    .eq("job_id", jobId)
+    .eq("position", stagePosition)
+    .eq("status", "running")
+    .order("started_at")
+    .order("id");
+  if (concurrent && concurrent.length > 1 && concurrent[0].id !== runId) {
+    await db().from("stage_runs").delete().eq("id", runId);
+    if (chain) scheduleChainTick(req, jobId, 15_000);
+    return Response.json({
+      pending: true,
+      position: stagePosition,
+      totalStages: enabledStages.length,
+      stageName: stage.name,
+    });
+  }
 
   if (missing.length) {
     await logEvent(

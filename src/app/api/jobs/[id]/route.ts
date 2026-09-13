@@ -22,12 +22,17 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     .order("position")
     .order("started_at");
 
-  // Samonaprawa łańcucha: job "running", ale od >90 s nie było żadnej aktywności
-  // (np. ogniwo łańcucha padło na przejściowym błędzie) — wskrześ pętlę serwerową.
+  // Samonaprawa łańcucha: job "running", ale od >90 s nie było żadnej aktywności —
+  // wskrześ pętlę serwerową. Za aktywność liczy się też heartbeat odpytywania
+  // (last_poll_at), żeby długa generacja w tle nie płodziła nowych linii łańcucha
+  // przy każdym odświeżeniu strony.
   if (job.status === "running") {
-    const timestamps = (runs ?? []).flatMap((r) =>
-      [r.started_at, r.finished_at].filter(Boolean).map((t) => new Date(t as string).getTime())
-    );
+    const timestamps = (runs ?? []).flatMap((r) => {
+      const lastPoll = (r.request_payload as { last_poll_at?: string } | null)?.last_poll_at;
+      return [r.started_at, r.finished_at, lastPoll]
+        .filter(Boolean)
+        .map((t) => new Date(t as string).getTime());
+    });
     const lastActivity = timestamps.length ? Math.max(...timestamps) : 0;
     if (Date.now() - lastActivity > 90_000) {
       scheduleChainTick(req, id, 1_000);
