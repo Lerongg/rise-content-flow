@@ -1,10 +1,11 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
+import { scheduleChainTick } from "@/lib/chain";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-export async function GET(_req: NextRequest, ctx: Ctx) {
+export async function GET(req: NextRequest, ctx: Ctx) {
   const unauthorized = await requireAuth();
   if (unauthorized) return unauthorized;
   const { id } = await ctx.params;
@@ -20,6 +21,18 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
     .eq("job_id", id)
     .order("position")
     .order("started_at");
+
+  // Samonaprawa łańcucha: job "running", ale od >90 s nie było żadnej aktywności
+  // (np. ogniwo łańcucha padło na przejściowym błędzie) — wskrześ pętlę serwerową.
+  if (job.status === "running") {
+    const timestamps = (runs ?? []).flatMap((r) =>
+      [r.started_at, r.finished_at].filter(Boolean).map((t) => new Date(t as string).getTime())
+    );
+    const lastActivity = timestamps.length ? Math.max(...timestamps) : 0;
+    if (Date.now() - lastActivity > 90_000) {
+      scheduleChainTick(req, id, 1_000);
+    }
+  }
   const { data: stages } = await db()
     .from("stages")
     .select("*, models(name, provider, model_id)")

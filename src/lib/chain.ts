@@ -13,7 +13,19 @@ export function scheduleChainTick(req: NextRequest, jobId: string, delayMs: numb
   waitUntil(
     (async () => {
       await new Promise((r) => setTimeout(r, delayMs));
-      await fetch(url, { method: "POST", headers: { cookie } }).catch(() => {});
+      // Pojedynczy nieudany fetch nie może zabić całego łańcucha — ponawiamy.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const res = await fetch(url, { method: "POST", headers: { cookie } });
+          // 2xx = ogniwo wykonane (kolejne zaplanuje samo);
+          // 409 = job nie jest w stanie running (stop/review/done) — łańcuch gaśnie celowo;
+          // 4xx/5xx inne = spróbuj ponownie.
+          if (res.ok || res.status === 409) return;
+        } catch {
+          // błąd sieciowy — ponów
+        }
+        await new Promise((r) => setTimeout(r, 5_000 * (attempt + 1)));
+      }
     })()
   );
 }
