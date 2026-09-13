@@ -27,7 +27,9 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     case "start":
     case "resume": {
       if (j.status === "running") {
-        // idempotentnie: runner może kontynuować pętlę bez błędu
+        // idempotentnie: runner może kontynuować pętlę bez błędu; wskrzeszamy też
+        // serwerowy łańcuch (scenariusz „Wznów przetwarzanie” po zamknięciu karty)
+        scheduleChainTick(req, id, 2_000);
         return Response.json(j);
       }
       const { data: project } = await db()
