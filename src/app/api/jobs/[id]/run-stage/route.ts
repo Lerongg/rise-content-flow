@@ -82,19 +82,18 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
     .eq("status", "running")
     .is("request_payload->>background_response_id", null)
     .lt("started_at", staleCutoff);
-  // Generacje w tle (OpenAI background) mogą legalnie trwać długo — sprzątamy dopiero po 2h
-  const bgStaleCutoff = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+  // Przebiegi "running" na pozycjach, które job już minął (np. duplikat z wyścigu,
+  // po którym nowsza próba zakończyła etap) — zamykamy jako zastąpione.
   await db()
     .from("stage_runs")
     .update({
       status: "error",
-      error: "Przerwane — generacja w tle nie zakończyła się w ciągu 2 godzin.",
+      error: "Zastąpione — etap został ukończony inną próbą.",
       finished_at: new Date().toISOString(),
     })
     .eq("job_id", jobId)
     .eq("status", "running")
-    .not("request_payload->>background_response_id", "is", null)
-    .lt("started_at", bgStaleCutoff);
+    .lt("position", job.current_position + 1);
 
   // Outputs of previous stages (latest successful attempt per position)
   const { data: prevRuns } = await db()
@@ -256,33 +255,54 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
     return Response.json({ error: message, position: stagePosition }, { status: 500 });
   }
 
-  // OpenAI background: jeśli generacja tego etapu jest już zlecona — tylko odpytaj status
-  if (model.provider === "openai") {
-    const { data: bgRuns } = await db()
-      .from("stage_runs")
-      .select("*")
-      .eq("job_id", jobId)
-      .eq("position", stagePosition)
-      .eq("status", "running")
-      .order("started_at", { ascending: false })
-      .limit(1);
-    const bgRun = bgRuns?.[0] as StageRunRow | undefined;
-    const bgId = (bgRun?.request_payload as { background_response_id?: string } | null)
+  // Czy ktoś już pracuje nad tym etapem? (generacja w tle lub równoległe wywołanie)
+  const { data: activeRuns } = await db()
+    .from("stage_runs")
+    .select("*")
+    .eq("job_id", jobId)
+    .eq("position", stagePosition)
+    .eq("status", "running")
+    .order("started_at", { ascending: false })
+    .limit(1);
+  const activeRun = activeRuns?.[0] as StageRunRow | undefined;
+  if (activeRun) {
+    const bgId = (activeRun.request_payload as { background_response_id?: string } | null)
       ?.background_response_id;
-    if (bgRun && bgId) {
+    const ageMs = Date.now() - new Date(activeRun.started_at).getTime();
+
+    if (bgId && model.provider === "openai") {
+      // Generacja w tle: ZAWSZE najpierw odpytaj (wynik czeka u OpenAI do 30 dni),
+      // dopiero brak wyniku po 24h traktujemy jako porażkę.
       const poll = await pollOpenAiBackground(model, bgId);
-      if (poll.status === "pending") {
-        return Response.json({
-          pending: true,
-          position: stagePosition,
-          totalStages: enabledStages.length,
-          stageName: stage.name,
-        });
-      }
+      if (poll.status === "completed") return finalizeSuccess(activeRun.id, poll.result);
       if (poll.status === "failed") {
-        return finalizeError(bgRun.id, poll.error, poll.responsePayload);
+        return finalizeError(activeRun.id, poll.error, poll.responsePayload);
       }
-      return finalizeSuccess(bgRun.id, poll.result);
+      if (ageMs > 24 * 60 * 60_000) {
+        return finalizeError(
+          activeRun.id,
+          "Generacja w tle nie zakończyła się w ciągu 24 godzin.",
+          null
+        );
+      }
+      return Response.json({
+        pending: true,
+        position: stagePosition,
+        totalStages: enabledStages.length,
+        stageName: stage.name,
+      });
+    }
+
+    // Świeży przebieg bez id generacji w tle: albo inne wywołanie właśnie zleca
+    // background (wyścig), albo trwa wywołanie synchroniczne — poczekaj zamiast
+    // tworzyć duplikat. Starsze martwe przebiegi sprząta czyściciel powyżej.
+    if (ageMs < 6 * 60_000) {
+      return Response.json({
+        pending: true,
+        position: stagePosition,
+        totalStages: enabledStages.length,
+        stageName: stage.name,
+      });
     }
   }
 
