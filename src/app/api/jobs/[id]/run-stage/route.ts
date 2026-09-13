@@ -12,6 +12,7 @@ import {
 import { publishWpDraft } from "@/lib/wordpress";
 import { maskModel } from "@/lib/maskModel";
 import { ClientRow, JobRow, ModelRow, StageRow, StageRunRow } from "@/lib/types";
+import { isChainRequest, scheduleChainTick } from "@/lib/chain";
 
 // One stage per invocation — keeps each request within serverless limits
 // and makes stop/resume natural.
@@ -20,10 +21,13 @@ export const maxDuration = 300;
 
 type Ctx = { params: Promise<{ id: string }> };
 
-export async function POST(_req: NextRequest, ctx: Ctx) {
+export async function POST(req: NextRequest, ctx: Ctx) {
   const unauthorized = await requireAuth();
   if (unauthorized) return unauthorized;
   const { id: jobId } = await ctx.params;
+  // Tryb łańcucha: to wywołanie pochodzi z serwerowej pętli (waitUntil) i po
+  // odpowiedzi niekońcowej planuje kolejny tick — workflow biegnie bez przeglądarki.
+  const chain = isChainRequest(req);
 
   const { data: jobData, error: jErr } = await db()
     .from("jobs")
@@ -140,6 +144,7 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
           ...(isLast ? { status: "done", finished_at: new Date().toISOString() } : {}),
         })
         .eq("id", jobId);
+      if (chain && !isLast) scheduleChainTick(req, jobId, 1_500);
       return Response.json({
         done: isLast,
         position: stagePosition,
@@ -229,6 +234,8 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
       })
       .eq("id", jobId);
 
+    if (chain && !isLastStage) scheduleChainTick(req, jobId, 1_500);
+
     return Response.json({
       done: isLastStage,
       position: stagePosition,
@@ -285,6 +292,7 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
           null
         );
       }
+      if (chain) scheduleChainTick(req, jobId, 15_000);
       return Response.json({
         pending: true,
         position: stagePosition,
@@ -297,6 +305,7 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
     // background (wyścig), albo trwa wywołanie synchroniczne — poczekaj zamiast
     // tworzyć duplikat. Starsze martwe przebiegi sprząta czyściciel powyżej.
     if (ageMs < 6 * 60_000) {
+      if (chain) scheduleChainTick(req, jobId, 15_000);
       return Response.json({
         pending: true,
         position: stagePosition,
@@ -375,6 +384,9 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
         {},
         jobId
       );
+      // po zleceniu ZAWSZE podtrzymaj łańcuch serwerowy — nawet gdy zlecał klient,
+      // żeby workflow dokończył się po zamknięciu przeglądarki
+      scheduleChainTick(req, jobId, 15_000);
       return Response.json({
         pending: true,
         position: stagePosition,

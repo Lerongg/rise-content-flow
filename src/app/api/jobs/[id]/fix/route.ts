@@ -6,6 +6,7 @@ import { interpolate } from "@/lib/interpolate";
 import { calcCost, callLlm } from "@/lib/providers";
 import { FIXER_MARKER } from "@/lib/factcheck";
 import { JobRow, ModelRow, StageRow, StageRunRow } from "@/lib/types";
+import { scheduleChainTick } from "@/lib/chain";
 
 export const maxDuration = 300;
 
@@ -113,6 +114,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       })
       .eq("id", jobId);
     await logEvent("info", "Fixer: wszystkie zgłoszenia zignorowane, tekst bez zmian.", {}, jobId);
+    if (!isLast) scheduleChainTick(req, jobId, 2_000);
     return Response.json({ done: isLast, reverify: false });
   }
 
@@ -225,5 +227,6 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     { poprawki: applied },
     jobId
   );
+  scheduleChainTick(req, jobId, 2_000);
   return Response.json({ reverify: true, fixed: fixedCount, applied });
 }

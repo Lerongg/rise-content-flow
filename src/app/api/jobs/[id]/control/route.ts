@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { db, logEvent } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
 import { JobRow, ProjectRow, VariableDef } from "@/lib/types";
+import { scheduleChainTick } from "@/lib/chain";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -57,6 +58,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         .single();
       if (uErr) return Response.json({ error: uErr.message }, { status: 500 });
       await logEvent("info", `Uruchomiono zapytanie (od etapu ${j.current_position + 1})`, {}, id);
+      // narodziny serwerowego łańcucha — workflow pobiegnie także bez przeglądarki
+      scheduleChainTick(req, id, 2_000);
       return Response.json(data);
     }
 
