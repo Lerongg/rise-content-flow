@@ -18,22 +18,28 @@ export interface ModelCaps {
   note: string;
 }
 
-const OPENAI_REASONING = /^(gpt-5|o[134])/;
+const OPENAI_REASONING = /^(gpt-[56]|o[134])/;
 const GPT56 = /^gpt-5\.6/;
+const GPT6 = /^gpt-6/;
 
 export function getModelCaps(provider: string, modelId: string): ModelCaps {
   if (provider === "openai" && OPENAI_REASONING.test(modelId)) {
+    // gpt-6 nie ma poziomu "none" — sampling jest niedostępny w ogóle
+    const levels = GPT6.test(modelId)
+      ? ["low", "medium", "high", "xhigh", "max"]
+      : GPT56.test(modelId)
+        ? ["none", "low", "medium", "high", "xhigh", "max"]
+        : ["none", "low", "medium", "high"];
     return {
       temperature: false,
       samplingOnlyWithThinkingNone: true,
       topK: false,
       topP: false,
-      thinkingLevels: GPT56.test(modelId)
-        ? ["none", "low", "medium", "high", "xhigh", "max"]
-        : ["none", "low", "medium", "high"],
+      thinkingLevels: levels,
       thinkingDefault: "medium",
-      note:
-        "Model reasoningowy OpenAI: temperature/top_p działają tylko przy poziomie thinking „none”; top_k niedostępny.",
+      note: GPT6.test(modelId)
+        ? "Model reasoningowy OpenAI (gpt-6): temperature/top_p/top_k niedostępne; steruj poziomem thinking (low…max)."
+        : "Model reasoningowy OpenAI: temperature/top_p działają tylko przy poziomie thinking „none”; top_k niedostępny.",
     };
   }
   if (provider === "openai" || provider === "openai-compatible") {
