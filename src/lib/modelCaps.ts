@@ -73,7 +73,7 @@ export function getModelCaps(provider: string, modelId: string): ModelCaps {
       levels = ["minimal", "low", "medium", "high"];
       def = "medium";
       thinkingParam = "thinkingLevel";
-    } else if (/^gemini-3\.1-pro|^gemini-3\.7/.test(modelId)) {
+    } else if (/^gemini-3\.1-pro|^gemini-3\.[78]|^gemini-4/.test(modelId)) {
       levels = ["low", "medium", "high"];
       def = "medium";
       thinkingParam = "thinkingLevel";

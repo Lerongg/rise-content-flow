@@ -1,10 +1,13 @@
+import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
+import { sweepStalledJobs } from "@/lib/chain";
 
 // Publiczny healthcheck + keep-alive dla Supabase (darmowy plan pauzuje projekt
 // po ~7 dniach bez aktywności; dzienne zapytanie z Vercel Cron temu zapobiega).
-// Nie zwraca żadnych danych poza statusem.
-export async function GET() {
+// Dodatkowo wskrzesza martwe łańcuchy wykonywania. Nie zwraca danych poza statusem.
+export async function GET(req: NextRequest) {
   try {
+    await sweepStalledJobs(req);
     const { count, error } = await db()
       .from("models")
       .select("id", { count: "exact", head: true });

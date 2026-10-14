@@ -1,11 +1,14 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireAuth } from "@/lib/auth";
+import { sweepStalledJobs } from "@/lib/chain";
 import { ProjectRow, VariableDef } from "@/lib/types";
 
 export async function GET(req: NextRequest) {
   const unauthorized = await requireAuth();
   if (unauthorized) return unauthorized;
+  // lista zapytań odświeża się, gdy coś działa — przy okazji wskrzeszaj martwe łańcuchy
+  await sweepStalledJobs(req);
   const projectId = req.nextUrl.searchParams.get("project_id");
   let query = db()
     .from("jobs")

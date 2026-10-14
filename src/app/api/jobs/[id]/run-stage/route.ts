@@ -12,7 +12,7 @@ import {
 import { publishWpDraft } from "@/lib/wordpress";
 import { maskModel } from "@/lib/maskModel";
 import { ClientRow, JobRow, ModelRow, StageRow, StageRunRow } from "@/lib/types";
-import { isChainRequest, scheduleChainTick } from "@/lib/chain";
+import { isChainAuthorized, isChainRequest, scheduleChainTick, sweepStalledJobs } from "@/lib/chain";
 
 // One stage per invocation — keeps each request within serverless limits
 // and makes stop/resume natural.
@@ -23,11 +23,13 @@ type Ctx = { params: Promise<{ id: string }> };
 
 export async function POST(req: NextRequest, ctx: Ctx) {
   const unauthorized = await requireAuth();
-  if (unauthorized) return unauthorized;
+  if (unauthorized && !isChainAuthorized(req)) return unauthorized;
   const { id: jobId } = await ctx.params;
   // Tryb łańcucha: to wywołanie pochodzi z serwerowej pętli (waitUntil) i po
   // odpowiedzi niekońcowej planuje kolejny tick — workflow biegnie bez przeglądarki.
   const chain = isChainRequest(req);
+  // Joby pilnują się nawzajem: tick jednego wskrzesza martwe łańcuchy pozostałych.
+  if (chain) await sweepStalledJobs(req, jobId);
 
   const { data: jobData, error: jErr } = await db()
     .from("jobs")
